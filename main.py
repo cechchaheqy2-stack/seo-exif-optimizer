@@ -1,299 +1,138 @@
 import os
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import io
+import zipfile
+import streamlit as st
+from PIL import Image, PngImagePlugin
+import piexif
+from piexif import helper
 
-from exif_reader import extract_metadata, format_metadata_for_display, load_keywords
-from injector import inject_keywords_into_image, process_folder
-from renamer import rename_images
+st.set_page_config(page_title="SEO Image EXIF Optimizer", page_icon="🖼️", layout="wide")
+st.title("🖼️ SEO Image EXIF Optimizer")
+st.caption("Upload images, inject SEO keywords, and download optimised files.")
 
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+PNG_TEXT_LIMIT = 7900
 
-APP_TITLE = "SEO Image EXIF Optimizer"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_KEYWORD_FILE = os.path.join(BASE_DIR, "keywords.txt")
-
-
-class SeoExifApp:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title(APP_TITLE)
-        self.root.geometry("980x640")
-        self.root.minsize(860, 560)
-        self.root.configure(bg="#f4efe8")
-
-        self.image_path = None
-        self.selected_folder = None
-        self.keyword_file = DEFAULT_KEYWORD_FILE
-
-        self._configure_styles()
-        self._build_layout()
-        self._load_default_keywords_into_ui()
-
-    def _configure_styles(self):
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("App.TFrame", background="#f4efe8")
-        style.configure("Card.TFrame", background="#fffaf3")
-        style.configure("Title.TLabel", background="#f4efe8", foreground="#3b2f2f", font=("Segoe UI Semibold", 18))
-        style.configure("Subtitle.TLabel", background="#f4efe8", foreground="#6e5b4f", font=("Segoe UI", 10))
-        style.configure("Section.TLabel", background="#fffaf3", foreground="#3b2f2f", font=("Segoe UI Semibold", 11))
-        style.configure("Action.TButton", font=("Segoe UI Semibold", 10), padding=8)
-        style.map("Action.TButton", background=[("active", "#d9822b")])
-
-    def _build_layout(self):
-        container = ttk.Frame(self.root, padding=18, style="App.TFrame")
-        container.pack(fill="both", expand=True)
-
-        header = ttk.Frame(container, style="App.TFrame")
-        header.pack(fill="x", pady=(0, 12))
-        ttk.Label(header, text=APP_TITLE, style="Title.TLabel").pack(anchor="w")
-        ttk.Label(
-            header,
-            text="Upload an image, inspect metadata, inject SEO keywords, rename files, or process an entire folder.",
-            style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
-
-        body = ttk.Frame(container, style="App.TFrame")
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=2)
-        body.rowconfigure(0, weight=1)
-
-        controls = ttk.Frame(body, padding=16, style="Card.TFrame")
-        controls.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        viewer = ttk.Frame(body, padding=16, style="Card.TFrame")
-        viewer.grid(row=0, column=1, sticky="nsew")
-        viewer.rowconfigure(1, weight=1)
-        viewer.columnconfigure(0, weight=1)
-
-        ttk.Label(controls, text="Controls", style="Section.TLabel").pack(anchor="w")
-
-        ttk.Button(controls, text="Upload Image", style="Action.TButton", command=self.select_image).pack(fill="x", pady=(12, 8))
-        ttk.Button(controls, text="Choose Folder", style="Action.TButton", command=self.select_folder).pack(fill="x", pady=8)
-        ttk.Button(controls, text="Inject Into Selected Image", style="Action.TButton", command=self.inject_keywords_for_selected_image).pack(fill="x", pady=8)
-        ttk.Button(controls, text="Inject Into All Photos", style="Action.TButton", command=self.process_selected_folder).pack(fill="x", pady=8)
-        ttk.Button(controls, text="Rename Images", style="Action.TButton", command=self.rename_selected_folder_images).pack(fill="x", pady=8)
-        ttk.Button(controls, text="Reload Keywords File", style="Action.TButton", command=self.reload_keywords_preview).pack(fill="x", pady=8)
-
-        ttk.Label(controls, text="Current image", style="Section.TLabel").pack(anchor="w", pady=(18, 6))
-        self.image_label = tk.Label(controls, text="No image selected", bg="#fffaf3", fg="#6e5b4f", wraplength=260, justify="left", anchor="w")
-        self.image_label.pack(fill="x")
-
-        ttk.Label(controls, text="Current folder", style="Section.TLabel").pack(anchor="w", pady=(18, 6))
-        self.folder_label = tk.Label(controls, text=BASE_DIR, bg="#fffaf3", fg="#6e5b4f", wraplength=260, justify="left", anchor="w")
-        self.folder_label.pack(fill="x")
-
-        ttk.Label(controls, text="Main keyword for renaming", style="Section.TLabel").pack(anchor="w", pady=(18, 6))
-        self.main_keyword_var = tk.StringVar()
-        keyword_entry = ttk.Entry(controls, textvariable=self.main_keyword_var)
-        keyword_entry.pack(fill="x")
-        tk.Label(
-            controls,
-            text="Used for names like keyword.jpg, keyword-2.jpg",
-            bg="#fffaf3",
-            fg="#8a7669",
-            justify="left",
-            anchor="w",
-            wraplength=260,
-        ).pack(fill="x", pady=(4, 0))
-
-        ttk.Label(controls, text="Keywords to inject", style="Section.TLabel").pack(anchor="w", pady=(18, 6))
-        self.manual_keywords_text = tk.Text(
-            controls,
-            height=7,
-            wrap="word",
-            font=("Consolas", 10),
-            bg="#fffdf9",
-            fg="#2f2722",
-            relief="flat",
-            padx=10,
-            pady=10,
-        )
-        self.manual_keywords_text.pack(fill="both", pady=(0, 6))
-        tk.Label(
-            controls,
-            text="Type one keyword per line, or leave this filled from keywords.txt.",
-            bg="#fffaf3",
-            fg="#8a7669",
-            justify="left",
-            anchor="w",
-            wraplength=260,
-        ).pack(fill="x")
-
-        ttk.Label(controls, text="Keyword source (.txt)", style="Section.TLabel").pack(anchor="w", pady=(18, 6))
-        self.keyword_file_label = tk.Label(controls, text=self.keyword_file, bg="#fffaf3", fg="#6e5b4f", wraplength=260, justify="left", anchor="w")
-        self.keyword_file_label.pack(fill="x")
-
-        ttk.Label(viewer, text="EXIF / Metadata Viewer", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-        self.metadata_text = tk.Text(viewer, wrap="word", font=("Consolas", 10), bg="#fffdf9", fg="#2f2722", relief="flat", padx=12, pady=12)
-        self.metadata_text.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
-        viewer_scroll = ttk.Scrollbar(viewer, orient="vertical", command=self.metadata_text.yview)
-        viewer_scroll.grid(row=1, column=1, sticky="ns", pady=(12, 0))
-        self.metadata_text.configure(yscrollcommand=viewer_scroll.set)
-
-        ttk.Label(viewer, text="Loaded keywords preview", style="Section.TLabel").grid(row=2, column=0, sticky="w", pady=(18, 0))
-        self.keywords_preview = tk.Text(viewer, height=8, wrap="word", font=("Consolas", 10), bg="#fffdf9", fg="#2f2722", relief="flat", padx=12, pady=12)
-        self.keywords_preview.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        self.keywords_preview.configure(state="disabled")
-
-    def _set_metadata_text(self, value: str):
-        self.metadata_text.delete("1.0", tk.END)
-        self.metadata_text.insert(tk.END, value)
-
-    def _set_keywords_preview(self, lines):
-        self.keywords_preview.configure(state="normal")
-        self.keywords_preview.delete("1.0", tk.END)
-        self.keywords_preview.insert(tk.END, "\n".join(lines))
-        self.keywords_preview.configure(state="disabled")
-        self.manual_keywords_text.delete("1.0", tk.END)
-        self.manual_keywords_text.insert(tk.END, "\n".join(lines))
-        if lines and not self.main_keyword_var.get().strip():
-            self.main_keyword_var.set(lines[0])
-
-    def _load_default_keywords_into_ui(self):
-        try:
-            keywords = load_keywords(self.keyword_file)
-            self._set_keywords_preview(keywords)
-        except Exception as exc:
-            self._set_keywords_preview([f"Unable to load keywords: {exc}"])
-
-    def reload_keywords_preview(self):
-        self._load_default_keywords_into_ui()
-        messagebox.showinfo(APP_TITLE, f"Keywords loaded from:\n{self.keyword_file}")
-
-    def select_image(self):
-        file_path = filedialog.askopenfilename(
-            title="Select an image",
-            filetypes=[("Images", "*.jpg *.jpeg *.png")],
-        )
-        if not file_path:
-            return
-
-        self.image_path = file_path
-        self.selected_folder = os.path.dirname(file_path)
-        self.image_label.configure(text=file_path)
-        self.folder_label.configure(text=self.selected_folder)
-        self._refresh_metadata_view(file_path)
-
-    def select_folder(self):
-        folder_path = filedialog.askdirectory(title="Select a folder with images")
-        if not folder_path:
-            return
-        self.selected_folder = folder_path
-        self.folder_label.configure(text=folder_path)
-        messagebox.showinfo(APP_TITLE, f"Folder selected:\n{folder_path}")
-
-    def _refresh_metadata_view(self, file_path: str):
-        try:
-            metadata = extract_metadata(file_path)
-            self._set_metadata_text(format_metadata_for_display(metadata))
-        except Exception as exc:
-            self._set_metadata_text(f"Unable to read metadata.\n\n{exc}")
-            messagebox.showerror(APP_TITLE, str(exc))
-
-    def _load_keywords(self):
-        typed_keywords = [
-            line.strip()
-            for line in self.manual_keywords_text.get("1.0", tk.END).splitlines()
-            if line.strip()
-        ]
-        if typed_keywords:
-            return typed_keywords
-        return load_keywords(self.keyword_file)
-
-    def _resolve_folder_path(self):
-        folder_path = self.selected_folder or (os.path.dirname(self.image_path) if self.image_path else None)
-        if folder_path and os.path.isdir(folder_path):
-            return folder_path
-
-        folder_path = filedialog.askdirectory(title="Select a folder with images")
-        if folder_path:
-            self.selected_folder = folder_path
-            self.folder_label.configure(text=folder_path)
-        return folder_path
-
-    def inject_keywords_for_selected_image(self):
-        if not self.image_path:
-            messagebox.showwarning(APP_TITLE, "Please upload an image first.")
-            return
-
-        try:
-            keywords = self._load_keywords()
-            inject_keywords_into_image(self.image_path, keywords)
-            self._refresh_metadata_view(self.image_path)
-            messagebox.showinfo(APP_TITLE, "Keywords injected successfully into the selected image.")
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Injection failed:\n{exc}")
-
-    def rename_selected_folder_images(self):
-        folder_path = self._resolve_folder_path()
-        if not folder_path:
-            messagebox.showwarning(APP_TITLE, "Please choose a folder or upload an image first.")
-            return
-
-        main_keyword = self.main_keyword_var.get().strip()
-        if not main_keyword:
+def decode_bytes(value):
+    if isinstance(value, bytes):
+        for enc in ("utf-8", "utf-16le", "latin-1"):
             try:
-                main_keyword = self._load_keywords()[0]
-                self.main_keyword_var.set(main_keyword)
+                return value.decode(enc).rstrip("\x00")
+            except UnicodeDecodeError:
+                continue
+        return value.decode("utf-8", errors="replace").rstrip("\x00")
+    return value
+
+def empty_exif():
+    return {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}, "thumbnail": None}
+
+def extract_metadata(data, filename):
+    ext = os.path.splitext(filename)[1].lower()
+    image = Image.open(io.BytesIO(data))
+    meta = {"File": filename, "Format": image.format or "Unknown",
+            "Size": f"{image.width} x {image.height}",
+            "Keywords": "Not available", "User comment": "Not available"}
+    if ext in (".jpg", ".jpeg"):
+        exif_bytes = image.info.get("exif", b"")
+        exif_dict = piexif.load(exif_bytes) if exif_bytes else empty_exif()
+        xp = exif_dict["0th"].get(piexif.ImageIFD.XPKeywords)
+        if xp:
+            meta["Keywords"] = decode_bytes(xp) or "Not available"
+        uc = exif_dict["Exif"].get(piexif.ExifIFD.UserComment)
+        if uc:
+            try:
+                meta["User comment"] = helper.UserComment.load(uc)
             except Exception:
-                main_keyword = ""
-        if not main_keyword:
-            messagebox.showwarning(APP_TITLE, "Please type a main keyword, or add at least one keyword in the keywords box.")
-            return
+                meta["User comment"] = decode_bytes(uc) or "Not available"
+    else:
+        meta["Keywords"] = image.info.get("Keywords", "Not available")
+        meta["User comment"] = image.info.get("UserComment", "Not available")
+    image.close()
+    return meta
 
-        try:
-            renamed = rename_images(folder_path, main_keyword)
-            if self.image_path:
-                current_name = os.path.basename(self.image_path)
-                for old_name, new_name in renamed:
-                    if old_name == current_name:
-                        self.image_path = os.path.join(folder_path, new_name)
-                        self.image_label.configure(text=self.image_path)
-                        break
-            summary = "\n".join(f"{old} -> {new}" for old, new in renamed[:10])
-            if len(renamed) > 10:
-                summary += f"\n... and {len(renamed) - 10} more file(s)."
-            messagebox.showinfo(APP_TITLE, f"Renamed {len(renamed)} image(s).\n\n{summary}")
-            if self.image_path:
-                self._refresh_metadata_view(self.image_path)
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Rename failed:\n{exc}")
+def inject_keywords(data, filename, keywords):
+    ext = os.path.splitext(filename)[1].lower()
+    keyword_text = ", ".join(keywords)
+    image = Image.open(io.BytesIO(data))
+    buf = io.BytesIO()
+    if ext in (".jpg", ".jpeg"):
+        exif_bytes = image.info.get("exif", b"")
+        exif_dict = piexif.load(exif_bytes) if exif_bytes else empty_exif()
+        exif_dict["0th"][piexif.ImageIFD.ImageDescription] = keyword_text.encode("utf-8")
+        exif_dict["0th"][piexif.ImageIFD.XPKeywords] = keyword_text.encode("utf-16le") + b"\x00\x00"
+        exif_dict["Exif"][piexif.ExifIFD.UserComment] = helper.UserComment.dump(keyword_text, encoding="unicode")
+        image.save(buf, format="JPEG", exif=piexif.dump(exif_dict), quality=95)
+    else:
+        png_info = PngImagePlugin.PngInfo()
+        for k, v in image.info.items():
+            if isinstance(v, str):
+                png_info.add_text(k, v[:PNG_TEXT_LIMIT])
+        png_info.add_text("Keywords", keyword_text[:PNG_TEXT_LIMIT])
+        png_info.add_text("Description", keyword_text[:PNG_TEXT_LIMIT])
+        image.save(buf, format="PNG", pnginfo=png_info)
+    image.close()
+    return buf.getvalue()
 
-    def process_selected_folder(self):
-        folder_path = self._resolve_folder_path()
-        if not folder_path:
-            messagebox.showwarning(APP_TITLE, "Please choose a folder or upload an image first.")
-            return
+def slugify(value):
+    cleaned = []
+    for ch in value.strip().lower():
+        if ch.isalnum():
+            cleaned.append(ch)
+        elif ch in {" ", "-", "_"}:
+            cleaned.append("-")
+    slug = "".join(cleaned)
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-")
 
-        try:
-            keywords = self._load_keywords()
-            processed, failures = process_folder(folder_path, keywords)
-            if processed == 0 and not failures:
-                messagebox.showwarning(APP_TITLE, "No supported images were found in the selected folder.")
-                return
+# ── Sidebar ──
+with st.sidebar:
+    st.header("⚙️ Settings")
+    keywords_raw = st.text_area("Keywords (one per line)", value="handmade jewelry\nsterling silver ring\nboho style", height=200)
+    keywords = [k.strip() for k in keywords_raw.splitlines() if k.strip()]
+    st.caption(f"{len(keywords)} keyword(s)")
+    main_keyword = st.text_input("Main keyword for renaming", value=keywords[0] if keywords else "")
+    do_rename = st.checkbox("Rename files", value=False)
 
-            if self.image_path and os.path.dirname(self.image_path) == folder_path:
-                self._refresh_metadata_view(self.image_path)
+# ── Upload ──
+uploaded_files = st.file_uploader("Upload images (JPG / PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-            if failures:
-                failure_text = "\n".join(failures[:10])
-                if len(failures) > 10:
-                    failure_text += f"\n... and {len(failures) - 10} more error(s)."
-                messagebox.showwarning(
-                    APP_TITLE,
-                    f"Processed {processed} image(s) with {len(failures)} issue(s).\n\n{failure_text}",
-                )
-            else:
-                messagebox.showinfo(APP_TITLE, f"Processed {processed} image(s) successfully.")
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Folder processing failed:\n{exc}")
+if not uploaded_files:
+    st.info("👆 Upload images to get started")
+    st.stop()
 
+st.subheader(f"📋 {len(uploaded_files)} image(s) uploaded")
+for uf in uploaded_files:
+    data = uf.read(); uf.seek(0)
+    with st.expander(f"🔍 {uf.name}"):
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.image(data, use_container_width=True)
+        with col2:
+            for k, v in extract_metadata(data, uf.name).items():
+                st.markdown(f"**{k}:** {v}")
 
-def run_app():
-    root = tk.Tk()
-    SeoExifApp(root)
-    root.mainloop()
+st.divider()
 
-
-if __name__ == "__main__":
-    run_app()
+if st.button("💉 Inject Keywords & Download ZIP", type="primary", use_container_width=True):
+    if not keywords:
+        st.warning("Add keywords in the sidebar first!")
+        st.stop()
+    zip_buf = io.BytesIO()
+    results = []
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for idx, uf in enumerate(uploaded_files, start=1):
+            data = uf.read()
+            try:
+                injected = inject_keywords(data, uf.name, keywords)
+                slug = slugify(main_keyword) if main_keyword else slugify(uf.name)
+                ext = os.path.splitext(uf.name)[1].lower()
+                out_name = (f"{slug}{ext}" if idx == 1 else f"{slug}-{idx}{ext}") if do_rename else uf.name
+                zf.writestr(out_name, injected)
+                results.append(("✅", uf.name, out_name))
+            except Exception as e:
+                results.append(("❌", uf.name, str(e)))
+    zip_buf.seek(0)
+    st.download_button("⬇️ Download ZIP", data=zip_buf, file_name="seo-images.zip", mime="application/zip", use_container_width=True)
+    for status, orig, out in results:
+        st.markdown(f"{status} `{orig}` → `{out}`")
